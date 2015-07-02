@@ -9,16 +9,24 @@ class Hiera
         class Yamlgpg_backend
             def initialize(cache=nil)
                 require 'yaml'
-                require 'gpgme'
+                begin
+                  require 'gpgme'
+                # Jruby does not support gpgme, so we use ruby_gpg if we
+                # cant find gpgme. This is needed for puppetserver
+                rescue LoadError
+                  begin
+                    require 'ruby_gpg'
+                  rescue LoadError
+                    fail "hiera_yamlgpg requires 'gpgme' or 'ruby_gpg' gem"
+                  end
+                end
 
                 homes = ["HOME", "HOMEPATH"]
                 real_home = homes.detect { |h| ENV[h] != nil }
 
-                key_dir = Config[:yamlgpg][:key_dir] || "#{ENV[real_home]}/.gnupg"
+                @key_dir = Config[:yamlgpg][:key_dir] || "#{ENV[real_home]}/.gnupg"
                 @fail = Config[:yamlgpg][:fail_on_error] || false
 
-                GPGME::Engine.home_dir = key_dir
-                @ctx = GPGME::Ctx.new
                 @cache = cache || Filecache.new
 
                 Hiera.debug("Hiera yamlgpg backend starting")
@@ -96,12 +104,19 @@ class Hiera
             end
 
             def decrypt_ciphertext(ciphertext)
-                if @ctx.keys.empty?
+                unless defined?(GPGME)
+                  RubyGpg.config.homedir = @key_dir
+                  return RubyGpg.decrypt_string(ciphertext)
+                end
+
+                GPGME::Engine.home_dir = @key_dir
+                ctx = GPGME::Ctx.new
+                if ctx.keys.empty?
                     raise YamlgpgError, "No usable keys found in #{GPGME::Engine.info.first.home_dir}. Check :key_dir value in hiera.yaml is correct"
                 end
 
                 begin
-                    txt = @ctx.decrypt(GPGME::Data.new(ciphertext))
+                    txt = ctx.decrypt(GPGME::Data.new(ciphertext))
                 rescue GPGME::Error::DecryptFailed => e
                     raise YamlgpgError, "GPG Decryption failed, check your GPG settings: #{e}"
                 rescue Exception => e
